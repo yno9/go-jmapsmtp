@@ -1,0 +1,11 @@
+{
+  "port": 8767,
+  "bind": "0.0.0.0",
+  "relayname": "smtp-host",
+  "password": "changeme",
+  "address": "you@example.com",
+  "domain": "example.com",
+  "smtp_port": 25,
+  "relay_host": "",
+  "dkim_selector": "biset"
+}
