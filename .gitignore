@@ -1,0 +1,17 @@
+# build artifacts
+jmapsmtp
+jmapsmtp-linux
+jmapsmtp_linux
+jmap-smtp
+jmap-smtp-linux
+go-jmap-smtp
+
+# runtime data
+data/
+*.log
+/tmp/jmapsmtp-last-*.eml
+
+# secrets
+config.json
+*.pem
+*.key

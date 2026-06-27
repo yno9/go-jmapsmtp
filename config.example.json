@@ -1,11 +1,23 @@
 {
-  "port": 8767,
-  "bind": "0.0.0.0",
-  "relayname": "smtp-host",
+  "listen_addr": "0.0.0.0:8767",
+  "base_url": "https://mail.example.com",
+  "relayname": "jmap-smtp",
   "password": "changeme",
-  "address": "you@example.com",
-  "domain": "example.com",
+  "hostname": "mail.example.com",
   "smtp_port": 25,
   "relay_host": "",
-  "dkim_selector": "biset"
+  "domain": {
+    "example.com": {
+      "dkim_selector": "",
+      "account": {
+        "you@example.com": {
+          "password": "changeme",
+          "alias": ["alias@example.com"]
+        },
+        "you2@example.com": {
+          "password": "changeme"
+        }
+      }
+    }
+  }
 }
