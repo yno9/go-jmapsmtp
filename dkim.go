@@ -80,7 +80,7 @@ func signDKIMForDomain(raw []byte, fromDomain string) []byte {
 		Signer:                 key,
 		HeaderCanonicalization: dkim.CanonicalizationRelaxed,
 		BodyCanonicalization:   dkim.CanonicalizationRelaxed,
-		HeaderKeys:             []string{"From", "To", "Subject", "Date", "Message-Id", "Content-Type"},
+		HeaderKeys:             []string{"From", "To", "Cc", "Subject", "Date", "Message-Id", "Content-Type"},
 	}
 	var out bytes.Buffer
 	if err := dkim.Sign(&out, strings.NewReader(string(raw)), opts); err != nil {
