@@ -69,7 +69,7 @@ func signDKIMForDomain(raw []byte, fromDomain string) []byte {
 	if !ok {
 		return raw
 	}
-	domCfg := cfg.Domains[fromDomain]
+	domCfg, _ := domainConfig(fromDomain)
 	selector := domCfg.DKIMSelector
 	if selector == "" {
 		selector = "default"
