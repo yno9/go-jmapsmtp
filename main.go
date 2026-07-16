@@ -31,6 +31,7 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/ProtonMail/go-crypto/openpgp"
 	jmapserver "github.com/yno9/go-jmapserver"
+	"github.com/yno9/go-jmapserver/pkarr"
 )
 
 // ── config ────────────────────────────────────────────────────────────────────
@@ -52,9 +53,13 @@ func generateToken() string {
 }
 
 type DomainConfig struct {
-	DKIMSelector   string                   `json:"dkim_selector"`
-	Accounts       map[string]AccountConfig `json:"account"`
-	AllowProvision bool                     `json:"allow_provision"`
+	DKIMSelector string                   `json:"dkim_selector"`
+	Accounts     map[string]AccountConfig `json:"account"`
+	// allow_provision: open self-service (anyone can create, DID-signed).
+	// provision_secret: gated — creation needs this shared secret (privileged
+	// domains like the apex; not creatable from the UI). One or the other.
+	AllowProvision  bool   `json:"allow_provision"`
+	ProvisionSecret string `json:"provision_secret,omitempty"`
 }
 
 type Config struct {
@@ -87,6 +92,10 @@ type Config struct {
 	// PeerDataDirs lists sibling relay data directories to check for activity
 	// before purging. An account is only purged if all peers are also inactive.
 	PeerDataDirs []string `json:"peer_data_dirs"`
+	// DomainVerifySecret keys the deterministic ownership-verification token
+	// for custom (BYO) domains (see customdomain.go). Required for that
+	// feature to work; leave empty to disable custom-domain onboarding.
+	DomainVerifySecret string `json:"domain_verify_secret,omitempty"`
 }
 
 // registerRelayInfo advertises this relay's display label/color so the biset
@@ -101,7 +110,21 @@ func registerRelayInfo(mux *http.ServeMux, label, color string) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"label": label, "color": color}) //nolint:errcheck
+		// "type" reports what this relay actually IS (jmapsmtp = mail), so a
+		// client can classify ANY relay it connects to — not just its own
+		// home mail/ap pair — instead of guessing via a home-config URL match.
+		// "domain" is the domain a NEW account actually lands under
+		// (provisionDomain(), i.e. whichever configured domain has
+		// allow_provision — NOT necessarily this relay's own hostname; e.g.
+		// t.biset.md accounts are provisioned on the mail.biset.md relay).
+		// Client-side UI previewing "username@<relay hostname>" before
+		// signup was wrong whenever those differ; this lets it show the
+		// real domain instead of guessing from the URL.
+		resp := map[string]string{"label": label, "color": color, "type": "mail"}
+		if d := provisionDomain(); d != "" {
+			resp["domain"] = d
+		}
+		json.NewEncoder(w).Encode(resp) //nolint:errcheck
 	})
 }
 
@@ -303,6 +326,18 @@ func makeStore(localpart, domain, dataDir string, hub *jmapserver.Hub) (*jmapser
 		senderEntity := loadUserPubkeyEntity(dataDir, domain, localpart)
 		go func() {
 			sentMsgID, err := sendEmail(smtpMsg, env, senderEntity, dataDir, domain)
+			peer := ""
+			if len(env.RcptTo) > 0 {
+				rcpts := make([]string, 0, len(env.RcptTo))
+				for _, r := range env.RcptTo {
+					rcpts = append(rcpts, r.Email)
+				}
+				peer = strings.Join(rcpts, ",")
+			}
+			logActivity(domain, localpart, jmapserver.ActivityEvent{
+				Dir: "out", Kind: "email", Peer: peer,
+				Bytes: int64(len(body)), Result: activityResult(err),
+			})
 			if err != nil {
 				smtpOutbound.WithLabelValues("failed").Inc()
 				log.Printf("[smtp] send failed: %v", err)
@@ -337,25 +372,40 @@ func (h *handler) addDynAccount(localpart, domain, dataDir string) {
 	log.Printf("[provision] registered account %s", email)
 }
 
-// scanDynAccounts loads dynamic accounts from disk (for restart recovery).
+// scanDynAccounts loads dynamic accounts from disk (for restart recovery) —
+// every domain (static config + registered custom domains), and existence is
+// an auth_token_hash credential, not an envelope (envelope-less third-party /
+// DID-only accounts are a legitimate, common case — see DID.md third-party
+// portability — and must survive a restart exactly like any other account).
 func scanDynAccounts(h *handler, dataDir string) {
-	domain := primaryDomain()
-	entries, err := os.ReadDir(filepath.Join(dataDir, domain))
-	if err != nil {
-		return
+	domains := map[string]bool{}
+	for d := range cfg.Domains {
+		domains[d] = true
 	}
-	staticAccts := map[string]bool{}
-	if domCfg, ok := cfg.Domains[domain]; ok {
-		for lp := range domCfg.Accounts {
-			staticAccts[lp] = true
-		}
+	dynDomainsMu.RLock()
+	for d := range dynDomains {
+		domains[d] = true
 	}
-	for _, e := range entries {
-		if !e.IsDir() || e.Name() == "peers" || staticAccts[e.Name()] {
+	dynDomainsMu.RUnlock()
+
+	for domain := range domains {
+		entries, err := os.ReadDir(filepath.Join(dataDir, domain))
+		if err != nil {
 			continue
 		}
-		if readEnvelope(dataDir, domain, e.Name()) != nil {
-			h.addDynAccount(e.Name(), domain, dataDir)
+		staticAccts := map[string]bool{}
+		if domCfg, ok := cfg.Domains[domain]; ok {
+			for lp := range domCfg.Accounts {
+				staticAccts[lp] = true
+			}
+		}
+		for _, e := range entries {
+			if !e.IsDir() || e.Name() == "peers" || staticAccts[e.Name()] {
+				continue
+			}
+			if readAuthHash(dataDir, domain, e.Name()) != "" {
+				h.addDynAccount(e.Name(), domain, dataDir)
+			}
 		}
 	}
 }
@@ -378,6 +428,31 @@ type incoming struct {
 
 var bufCh = make(chan incoming, 256)
 
+// smtpDataDir is the account data root, captured at startup so the delivery path
+// (which doesn't thread dataDir everywhere) can write per-account activity.
+// Mirrors go-jmapap's apDataDir.
+var smtpDataDir string
+
+// logActivity records a per-account activity event, best-effort: a failed audit
+// write must never break delivery. Same shape as the AP relay's helper so the
+// admin API reads a uniform activity.log across both relays.
+func logActivity(domain, localpart string, ev jmapserver.ActivityEvent) {
+	if smtpDataDir == "" {
+		return
+	}
+	if err := jmapserver.AppendActivity(smtpDataDir, domain, localpart, ev); err != nil {
+		log.Printf("[smtp] %s@%s activity log: %v", localpart, domain, err)
+	}
+}
+
+// activityResult maps a send error to the ActivityEvent.Result label.
+func activityResult(err error) string {
+	if err != nil {
+		return "failed"
+	}
+	return "ok"
+}
+
 func bufferEmail(account string, e email.Email) {
 	select {
 	case bufCh <- incoming{account, e}:
@@ -393,6 +468,20 @@ func (h *handler) drainBuffer() {
 			store, ok := h.stores[inc.account]
 			if ok {
 				store.Put(inc.msg) //nolint:errcheck
+				if parts := strings.SplitN(inc.account, "@", 2); len(parts) == 2 {
+					peer := ""
+					if len(inc.msg.From) > 0 && inc.msg.From[0] != nil {
+						peer = inc.msg.From[0].Email
+					}
+					msgID := ""
+					if len(inc.msg.MessageID) > 0 {
+						msgID = inc.msg.MessageID[0]
+					}
+					logActivity(parts[1], parts[0], jmapserver.ActivityEvent{
+						Dir: "in", Kind: "email", Peer: peer,
+						MsgID: msgID, Bytes: int64(inc.msg.Size),
+					})
+				}
 			}
 		default:
 			return
@@ -938,11 +1027,11 @@ func cleanupOrphanedData(dir string) {
 		return
 	}
 	for _, dd := range domainDirs {
-		if !dd.IsDir() {
+		if !dd.IsDir() || dd.Name() == "_domains" {
 			continue
 		}
 		domain := dd.Name()
-		domCfg, ok := cfg.Domains[domain]
+		domCfg, ok := domainConfig(domain)
 		if !ok {
 			os.RemoveAll(filepath.Join(dataDir, domain))
 			log.Printf("cleanup: removed data/%s", domain)
@@ -958,8 +1047,14 @@ func cleanupOrphanedData(dir string) {
 				continue // reserved for Autocrypt peer key storage
 			}
 			if _, ok := domCfg.Accounts[localpart]; !ok {
-				// Skip dynamic accounts (they have an envelope.json but no static config entry).
-				if readEnvelope(filepath.Join(dir, "data"), domain, localpart) != nil {
+				// Skip dynamic accounts (no static config entry, but a real
+				// credential on disk). Accounts are purely dynamic — existence
+				// is defined by having an auth_token_hash, not an envelope
+				// (third-party/DID-only accounts legitimately have no envelope
+				// at all, see DID.md third-party portability). Checking only
+				// readEnvelope here would delete every envelope-less dynamic
+				// account on the next restart.
+				if readAuthHash(filepath.Join(dir, "data"), domain, localpart) != "" {
 					continue
 				}
 				os.RemoveAll(filepath.Join(dataDir, domain, localpart))
@@ -987,11 +1082,13 @@ func main() {
 		log.Fatalf("config: no domains defined")
 	}
 
+	dataDir := filepath.Join(dir, "data")
+	smtpDataDir = dataDir // enable per-account activity logging from the delivery path
+
 	loadPGPEntity()
+	loadDynDomains(dataDir) // must run before cleanupOrphanedData, or a just-verified custom domain looks orphaned
 	cleanupOrphanedData(dir)
 	loadOrGenerateDKIMKeys(dir)
-
-	dataDir := filepath.Join(dir, "data")
 
 	// Create handler early so AuthFunc can reference it.
 	h := &handler{
@@ -1025,15 +1122,15 @@ func main() {
 			}
 		}
 
-		env := readEnvelope(dataDir, domain, localpart)
-		if env == nil {
+		hash := readAuthHash(dataDir, domain, localpart)
+		if hash == "" {
 			return "", false
 		}
 		tok, err := decodeAuthToken(password)
 		if err != nil {
 			return "", false
 		}
-		if !env.VerifyAuth(tok) {
+		if !jmapserver.VerifyAuthToken(tok, hash) {
 			return "", false
 		}
 		return jmap.ID(username), true
@@ -1092,6 +1189,38 @@ func main() {
 	registerSetup(mux, dataDir)
 	registerAuthEnv(mux, dataDir)
 	registerProvision(mux, h, dataDir)
+	registerDidUpdate(mux, dataDir)
+	jmapserver.RegisterDIDLocalIndex(mux, dataDir)
+	jmapserver.RegisterContactsEndpoints(mux, dataDir, authenticate)
+	if cfg.DomainVerifySecret != "" {
+		registerCustomDomain(mux, dataDir)
+	}
+	// Pkarr/did:dht resolution gateway (DID.md). Opt-in via PKARR_GATEWAY=1 —
+	// starts a Mainline DHT node (UDP), off until explicitly enabled. Created
+	// before registerAccountDelete (below) so a deleted identity's record can
+	// be evicted from the republish cache — see pkarr.Gateway.Forget.
+	var pkarrGw *pkarr.Gateway
+	if os.Getenv("PKARR_GATEWAY") == "1" {
+		if gw, err := pkarr.NewGateway(nil); err != nil {
+			log.Printf("[pkarr] gateway disabled: %v", err)
+		} else {
+			pkarrGw = gw
+			pkarr.RegisterGateway(mux, gw)
+			log.Printf("[pkarr] gateway enabled")
+		}
+	}
+	registerAccountDelete(mux, h, dataDir, pkarrGw)
+	jmapserver.RegisterStorageEndpoints(mux, dataDir, authenticate, func(email string) int {
+		h.mu.RLock()
+		st := h.stores[email]
+		h.mu.RUnlock()
+		if st == nil {
+			return 0
+		}
+		n := st.Purge()
+		h.hub.Notify()
+		return n
+	})
 	{
 		label, color := cfg.RelayLabel, cfg.RelayColor
 		if label == "" {
@@ -1108,11 +1237,17 @@ func main() {
 		Version:    version,
 		Token:      os.Getenv("METRICS_TOKEN"),
 	}, relayCollectors()...)
+	jmapserver.RegisterAdmin(mux, jmapserver.AdminOptions{
+		DataDir:    dataDir,
+		RelayLabel: cfg.RelayLabel,
+		Version:    version,
+		Token:      os.Getenv("ADMIN_TOKEN"),
+	})
 
 	addr := cfg.ListenAddr
 	if addr == "" {
 		addr = "0.0.0.0:8765"
 	}
 	log.Printf("go-jmap-smtp: jmap listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	log.Fatal(http.ListenAndServe(addr, jmapserver.WrapCORS(mux)))
 }

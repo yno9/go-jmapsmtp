@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/yno9/go-jmap-smtp/cryptenv"
+	jmapserver "github.com/yno9/go-jmapserver"
 )
 
 // envelope.json layout: cryptenv.Envelope serialized as JSON.
@@ -19,6 +20,29 @@ import (
 
 func envelopeFile(dataDir, domain, localpart string) string {
 	return filepath.Join(dataDir, domain, localpart, "envelope.json")
+}
+
+// Per-account, per-relay auth-token hash (base64(sha256(scoped token))). This is
+// what login verifies against now — NOT the envelope's hash — so tokens can be
+// relay-scoped (a token stolen by one relay is useless here) and DID-less /
+// third-party accounts (no envelope) still authenticate.
+func authHashFile(dataDir, domain, localpart string) string {
+	return filepath.Join(dataDir, domain, localpart, "auth_token_hash")
+}
+
+func readAuthHash(dataDir, domain, localpart string) string {
+	if b, err := os.ReadFile(authHashFile(dataDir, domain, localpart)); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
+}
+
+func writeAuthHash(dataDir, domain, localpart, hashB64 string) error {
+	dir := filepath.Join(dataDir, domain, localpart)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(authHashFile(dataDir, domain, localpart), []byte(hashB64), 0600)
 }
 
 func readEnvelope(dataDir, domain, localpart string) *cryptenv.Envelope {
@@ -58,18 +82,18 @@ func authenticate(r *http.Request, dataDir string) (domain, localpart string, ok
 		return "", "", false
 	}
 	lp, dm := parts[0], parts[1]
-	if _, exists := cfg.Domains[dm]; !exists {
+	if _, exists := domainConfig(dm); !exists {
 		return "", "", false
 	}
-	env := readEnvelope(dataDir, dm, lp)
-	if env == nil {
-		return "", "", false
+	hash := readAuthHash(dataDir, dm, lp)
+	if hash == "" {
+		return "", "", false // account has no relay-scoped credential
 	}
 	tok, err := decodeAuthToken(password)
 	if err != nil {
 		return "", "", false
 	}
-	if !env.VerifyAuth(tok) {
+	if !jmapserver.VerifyAuthToken(tok, hash) {
 		return "", "", false
 	}
 	return dm, lp, true
@@ -116,7 +140,7 @@ func registerAuthEnv(mux *http.ServeMux, dataDir string) {
 				return
 			}
 			lp, dm := parts[0], parts[1]
-			if _, ok := cfg.Domains[dm]; !ok {
+			if _, ok := domainConfig(dm); !ok {
 				http.NotFound(w, r)
 				return
 			}
@@ -229,7 +253,7 @@ func registerAuthEnv(mux *http.ServeMux, dataDir string) {
 		// setup-token claim leaves the name un-anchored and a sibling relay can't
 		// later be added to it (the anchor gate would 409 for lack of a record).
 		if cfg.AnchorURL != "" {
-			switch anchorClaim(cfg.AnchorURL, lp, envelopeFingerprint(newEnv)) {
+			switch jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(newEnv), "") {
 			case "conflict":
 				http.Error(w, "identity owned by a different key", http.StatusConflict)
 				return
