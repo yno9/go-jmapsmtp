@@ -57,7 +57,7 @@ func backfillAnchorPush(h *handler, dataDir string) {
 		}
 		// No DID at backfill time — no client interaction to derive one from.
 		// Fills in on this account's next lazy-migration login.
-		if jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(env), "") == "conflict" {
+		if jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(env), "", nil) == "conflict" {
 			log.Printf("[anchor] SPLIT DETECTED: %s is already claimed with a different key on the anchor", primary)
 		}
 	}
@@ -149,10 +149,13 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 				http.Error(w, "did_sig required when did is present", http.StatusBadRequest)
 				return
 			}
-			// Prove control of the DID (host-bound signature). r.Host is exactly
-			// the host the client signed against.
-			if err := jmapserver.VerifyDIDBinding(body.DID, username, r.Host, body.BindTS, body.DIDSig); err != nil {
-				http.Error(w, "did binding: "+err.Error(), http.StatusUnauthorized)
+			// The proof is verified by the anchor, not here (ANCHOR.md decision 1),
+			// so without an anchor there is nobody to verify it — and an unverified
+			// DID must never reach RecordLocalDID, or anyone could have this relay
+			// index someone else's identity as their own. Anchorless means plain
+			// accounts, exactly as ANCHOR.md's non-goals describe it.
+			if cfg.AnchorURL == "" {
+				http.Error(w, "did not supported on this relay (no identity anchor)", http.StatusBadRequest)
 				return
 			}
 		}
@@ -196,9 +199,16 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 			return
 		}
 
-		// Identity anchor: verify this name isn't already owned by a different DID.
-		if hasDID && cfg.AnchorURL != "" {
-			switch jmapserver.AnchorClaim(cfg.AnchorURL, username, domain, "", body.DID) {
+		// Identity anchor: prove control of the DID and verify this name isn't
+		// already owned by a different one — one round trip, both jobs. r.Host is
+		// forwarded verbatim: it is what the client signed against, and only this
+		// relay saw it first-hand.
+		if hasDID {
+			proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+			switch jmapserver.AnchorClaim(cfg.AnchorURL, username, domain, "", body.DID, proof) {
+			case "invalid":
+				http.Error(w, "did binding rejected", http.StatusUnauthorized)
+				return
 			case "conflict":
 				http.Error(w, "identity owned by a different key", http.StatusConflict)
 				return
@@ -279,7 +289,13 @@ func registerDidUpdate(mux *http.ServeMux, dataDir string) {
 			http.Error(w, "no envelope on file", http.StatusInternalServerError)
 			return
 		}
-		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID) {
+		// No proof to forward: this endpoint authenticates with the account's own
+		// credential, not a fresh binding signature (the client has no signing
+		// context here — see biset src/cryptenv.ts). The anchor therefore accepts
+		// a DID here unproven, which is why it cannot yet require did_sig
+		// outright: doing so would take lazy migration down. Giving this path a
+		// proof of its own is the prerequisite for that.
+		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID, nil) {
 		case "conflict":
 			http.Error(w, "did mismatch for this identity", http.StatusConflict)
 			return
