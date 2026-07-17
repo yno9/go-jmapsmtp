@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -17,50 +15,6 @@ import (
 )
 
 var validUsername = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,30}$`)
-
-// envelopeFingerprint hashes the cryptenv envelope. biset sends the identical
-// envelope to every relay, so this matches the fingerprint the anchor computed
-// for the AP relay's copy — the basis for detecting a split identity.
-func envelopeFingerprint(env *cryptenv.Envelope) string {
-	b, err := env.Bytes()
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
-// backfillAnchorPush registers existing local accounts with the anchor so
-// identities that predate it are protected too. A conflict here means the name
-// is already held on another relay by a DIFFERENT key — i.e. a pre-existing split
-// — which we surface loudly rather than silently.
-func backfillAnchorPush(h *handler, dataDir string) {
-	if cfg.AnchorURL == "" {
-		return
-	}
-	h.mu.RLock()
-	primaries := make([]string, 0, len(h.stores))
-	for p := range h.stores {
-		primaries = append(primaries, p)
-	}
-	h.mu.RUnlock()
-	for _, primary := range primaries {
-		parts := strings.SplitN(primary, "@", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		lp, dm := parts[0], parts[1]
-		env := readEnvelope(dataDir, dm, lp)
-		if env == nil {
-			continue
-		}
-		// No DID at backfill time — no client interaction to derive one from.
-		// Fills in on this account's next lazy-migration login.
-		if jmapserver.AnchorClaim(anchorRef(), lp, dm, envelopeFingerprint(env), "", nil) == "conflict" {
-			log.Printf("[anchor] SPLIT DETECTED: %s is already claimed with a different key on the anchor", primary)
-		}
-	}
-}
 
 // replyOnlyExempt returns true if the sender address or its domain is listed
 // in cfg.ReplyOnlyExempt, bypassing the reply_only_outbound restriction.
@@ -206,8 +160,8 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// forwarded verbatim: it is what the client signed against, and only this
 		// relay saw it first-hand.
 		if hasDID {
-			proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-			switch jmapserver.AnchorClaim(anchorRef(), username, domain, "", body.DID, proof) {
+			proof := jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+			switch jmapserver.AnchorClaim(anchorRef(), username, domain, body.DID, proof) {
 			case "invalid":
 				http.Error(w, "did binding rejected", http.StatusUnauthorized)
 				return
@@ -300,13 +254,12 @@ func registerDidUpdate(mux *http.ServeMux, dataDir string) {
 			http.Error(w, "did_sig required", http.StatusBadRequest)
 			return
 		}
-		env := readEnvelope(dataDir, domain, localpart)
-		if env == nil {
-			http.Error(w, "no envelope on file", http.StatusInternalServerError)
-			return
-		}
-		proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-		switch jmapserver.AnchorClaim(anchorRef(), localpart, domain, envelopeFingerprint(env), body.DID, proof) {
+		// The envelope used to be read here purely to fingerprint it for the
+		// claim. A claim names a DID and nothing else now, so an account with no
+		// envelope — a third-party relay never receives one — can register its
+		// DID like any other.
+		proof := jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+		switch jmapserver.AnchorClaim(anchorRef(), localpart, domain, body.DID, proof) {
 		case "invalid":
 			http.Error(w, "did binding rejected", http.StatusUnauthorized)
 			return

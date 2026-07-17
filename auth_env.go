@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -249,20 +248,9 @@ func registerAuthEnv(mux *http.ServeMux, dataDir string) {
 			http.Error(w, "invalid envelope", http.StatusBadRequest)
 			return
 		}
-		// Register the identity anchor, same as provisioning does — otherwise a
-		// setup-token claim leaves the name un-anchored and a sibling relay can't
-		// later be added to it (the anchor gate would 409 for lack of a record).
-		if cfg.AnchorURL != "" {
-			switch jmapserver.AnchorClaim(anchorRef(), lp, dm, envelopeFingerprint(newEnv), "", nil) {
-			case "conflict":
-				http.Error(w, "identity owned by a different key", http.StatusConflict)
-				return
-			case "error":
-				log.Printf("[anchor] unreachable (%s) — refusing signup of %s@%s", cfg.AnchorURL, lp, dm)
-				http.Error(w, "identity anchor unavailable", http.StatusServiceUnavailable)
-				return
-			}
-		}
+		// Nothing to anchor here. This used to claim the name by the envelope's
+		// fingerprint; a claim now names a DID, and a setup token brings none —
+		// the DID arrives later, signed, via PUT /account/did.
 		if err := writeEnvelope(dataDir, dm, lp, newEnv); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return

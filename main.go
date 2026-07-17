@@ -1215,7 +1215,6 @@ func main() {
 
 	// Push existing accounts' fingerprints to the identity anchor (best-effort,
 	// off the startup path); logs any pre-existing split it detects.
-	go backfillAnchorPush(h, dataDir)
 	startMaintenance(h, dataDir)
 
 	go startSMTP(h, dataDir)
