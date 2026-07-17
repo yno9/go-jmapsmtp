@@ -1190,7 +1190,8 @@ func main() {
 	registerAuthEnv(mux, dataDir)
 	registerProvision(mux, h, dataDir)
 	registerDidUpdate(mux, dataDir)
-	jmapserver.RegisterDIDLocalIndex(mux, dataDir)
+	// GET /identity/local/<did> is gone: the anchor's by-did answers the same
+	// question across every relay, not just this one (ANCHOR.md decision 1).
 	jmapserver.RegisterContactsEndpoints(mux, dataDir, authenticate)
 	if cfg.DomainVerifySecret != "" {
 		registerCustomDomain(mux, dataDir)
