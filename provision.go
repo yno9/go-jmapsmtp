@@ -274,10 +274,21 @@ func registerDidUpdate(mux *http.ServeMux, dataDir string) {
 			return
 		}
 		var body struct {
-			DID string `json:"did"`
+			DID    string `json:"did"`
+			BindTS int64  `json:"bind_ts"`
+			DIDSig string `json:"did_sig"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&body); err != nil || body.DID == "" {
 			http.Error(w, "did required", http.StatusBadRequest)
+			return
+		}
+		// Basic Auth proves the caller owns this ACCOUNT. It says nothing about
+		// whether they own the DID they are naming, and those are different
+		// claims: without a signature anyone with a self-service account could
+		// have the anchor bind a stranger's DID to their address, and publish a
+		// DNS record asserting it. Same rule as /account/provision.
+		if body.DIDSig == "" {
+			http.Error(w, "did_sig required", http.StatusBadRequest)
 			return
 		}
 		if cfg.AnchorURL == "" {
@@ -289,13 +300,11 @@ func registerDidUpdate(mux *http.ServeMux, dataDir string) {
 			http.Error(w, "no envelope on file", http.StatusInternalServerError)
 			return
 		}
-		// No proof to forward: this endpoint authenticates with the account's own
-		// credential, not a fresh binding signature (the client has no signing
-		// context here — see biset src/cryptenv.ts). The anchor therefore accepts
-		// a DID here unproven, which is why it cannot yet require did_sig
-		// outright: doing so would take lazy migration down. Giving this path a
-		// proof of its own is the prerequisite for that.
-		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID, nil) {
+		proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
+		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID, proof) {
+		case "invalid":
+			http.Error(w, "did binding rejected", http.StatusUnauthorized)
+			return
 		case "conflict":
 			http.Error(w, "did mismatch for this identity", http.StatusConflict)
 			return
