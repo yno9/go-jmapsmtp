@@ -253,7 +253,7 @@ func registerAuthEnv(mux *http.ServeMux, dataDir string) {
 		// setup-token claim leaves the name un-anchored and a sibling relay can't
 		// later be added to it (the anchor gate would 409 for lack of a record).
 		if cfg.AnchorURL != "" {
-			switch jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(newEnv), "", nil) {
+			switch jmapserver.AnchorClaim(anchorRef(), lp, dm, envelopeFingerprint(newEnv), "", nil) {
 			case "conflict":
 				http.Error(w, "identity owned by a different key", http.StatusConflict)
 				return

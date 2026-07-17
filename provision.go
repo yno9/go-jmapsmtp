@@ -56,7 +56,7 @@ func backfillAnchorPush(h *handler, dataDir string) {
 		}
 		// No DID at backfill time — no client interaction to derive one from.
 		// Fills in on this account's next lazy-migration login.
-		if jmapserver.AnchorClaim(cfg.AnchorURL, lp, dm, envelopeFingerprint(env), "", nil) == "conflict" {
+		if jmapserver.AnchorClaim(anchorRef(), lp, dm, envelopeFingerprint(env), "", nil) == "conflict" {
 			log.Printf("[anchor] SPLIT DETECTED: %s is already claimed with a different key on the anchor", primary)
 		}
 	}
@@ -207,7 +207,7 @@ func registerProvision(mux *http.ServeMux, h *handler, dataDir string) {
 		// relay saw it first-hand.
 		if hasDID {
 			proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-			switch jmapserver.AnchorClaim(cfg.AnchorURL, username, domain, "", body.DID, proof) {
+			switch jmapserver.AnchorClaim(anchorRef(), username, domain, "", body.DID, proof) {
 			case "invalid":
 				http.Error(w, "did binding rejected", http.StatusUnauthorized)
 				return
@@ -306,7 +306,7 @@ func registerDidUpdate(mux *http.ServeMux, dataDir string) {
 			return
 		}
 		proof := &jmapserver.BindingProof{Sig: body.DIDSig, TS: body.BindTS, Host: r.Host}
-		switch jmapserver.AnchorClaim(cfg.AnchorURL, localpart, domain, envelopeFingerprint(env), body.DID, proof) {
+		switch jmapserver.AnchorClaim(anchorRef(), localpart, domain, envelopeFingerprint(env), body.DID, proof) {
 		case "invalid":
 			http.Error(w, "did binding rejected", http.StatusUnauthorized)
 			return
@@ -374,7 +374,7 @@ func registerAccountDelete(mux *http.ServeMux, h *handler, dataDir string) {
 		}
 		h.mu.Unlock()
 
-		jmapserver.AnchorRelease(cfg.AnchorURL, localpart, domain)
+		jmapserver.AnchorRelease(anchorRef(), localpart, domain)
 		if err := os.RemoveAll(acctDir); err != nil {
 			log.Printf("[delete] failed to remove %s: %v", acctDir, err)
 			http.Error(w, "failed to delete account data", http.StatusInternalServerError)
