@@ -71,9 +71,19 @@ type Config struct {
 	TLSKeyFile  string                  `json:"smtp_tls_key"`
 	RelayLabel  string                  `json:"relay_label"`
 	RelayColor  string                  `json:"relay_color"`
-	// AnchorURL points at the domain's identity anchor (the apex / jmapap) whose
-	// name-claim registry prevents an address from being split across relays.
-	// Empty = no anchor (single-relay mode); provisioning proceeds unguarded.
+	// AnchorURL points at the standalone identity anchor (biset-anchor) this
+	// relay defers every DID question to: proving a DID belongs to whoever
+	// claims it, keeping one address from being split across relays, publishing
+	// the DNS record, and running the Pkarr/DHT gateway /pkarr forwards to.
+	//
+	// **This is the whole opt-in.** Set = this relay serves DID identities.
+	// Empty = anchorless, and anchorless means no DIDs at all, not DIDs without
+	// coordination (ANCHOR.md decision 2). It is a stricter mode, not a laxer
+	// one: an account with a DID is REFUSED (400), because the proof is checked
+	// by the anchor and there is nobody to check it — and this relay has kept no
+	// DID storage of its own since the local index moved to the anchor. Plain
+	// JMAP accounts are unaffected and behave identically either way; /pkarr is
+	// not mounted at all.
 	AnchorURL string `json:"anchor_url"`
 	// ReplyOnlyOutbound, when true, blocks outbound mail unless every recipient
 	// address has previously sent a message to the sender (i.e. appears as From
