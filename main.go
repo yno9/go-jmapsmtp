@@ -31,7 +31,6 @@ import (
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/ProtonMail/go-crypto/openpgp"
 	jmapserver "github.com/yno9/go-jmapserver"
-	"github.com/yno9/go-jmapserver/pkarr"
 )
 
 // ── config ────────────────────────────────────────────────────────────────────
@@ -1196,21 +1195,11 @@ func main() {
 	if cfg.DomainVerifySecret != "" {
 		registerCustomDomain(mux, dataDir)
 	}
-	// Pkarr/did:dht resolution gateway (DID.md). Opt-in via PKARR_GATEWAY=1 —
-	// starts a Mainline DHT node (UDP), off until explicitly enabled. Created
-	// before registerAccountDelete (below) so a deleted identity's record can
-	// be evicted from the republish cache — see pkarr.Gateway.Forget.
-	var pkarrGw *pkarr.Gateway
-	if os.Getenv("PKARR_GATEWAY") == "1" {
-		if gw, err := pkarr.NewGateway(nil); err != nil {
-			log.Printf("[pkarr] gateway disabled: %v", err)
-		} else {
-			pkarrGw = gw
-			pkarr.RegisterGateway(mux, gw)
-			log.Printf("[pkarr] gateway enabled")
-		}
-	}
-	registerAccountDelete(mux, h, dataDir, pkarrGw)
+	// Pkarr/did:dht gateway: this relay no longer runs a DHT node, it forwards
+	// to the anchor's (ANCHOR.md decision 1). The route stays because clients
+	// derive their gateway URL from their own relay and publish only there.
+	jmapserver.RegisterPkarrProxy(mux, cfg.AnchorURL)
+	registerAccountDelete(mux, h, dataDir)
 	jmapserver.RegisterStorageEndpoints(mux, dataDir, authenticate, func(email string) int {
 		h.mu.RLock()
 		st := h.stores[email]
