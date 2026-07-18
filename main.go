@@ -16,8 +16,8 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/smtp"
 	stdmail "net/mail"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,8 +28,8 @@ import (
 	"git.sr.ht/~rockorager/go-jmap/mail/email"
 	"git.sr.ht/~rockorager/go-jmap/mail/emailsubmission"
 	"git.sr.ht/~rockorager/go-jmap/mail/mailbox"
-	gosmtp "github.com/emersion/go-smtp"
 	"github.com/ProtonMail/go-crypto/openpgp"
+	gosmtp "github.com/emersion/go-smtp"
 	jmapserver "github.com/yno9/go-jmapserver"
 )
 
@@ -95,10 +95,10 @@ type Config struct {
 	// ReplyOnlyOutbound, when true, blocks outbound mail unless every recipient
 	// address has previously sent a message to the sender (i.e. appears as From
 	// in the sender's inbox). Prevents spam abuse on open-registration domains.
-	ReplyOnlyOutbound bool     `json:"reply_only_outbound"`
+	ReplyOnlyOutbound bool `json:"reply_only_outbound"`
 	// ReplyOnlyExempt lists domains (e.g. "biset.md") and addresses
 	// (e.g. "y@t.biset.md") whose senders bypass the reply_only_outbound check.
-	ReplyOnlyExempt   []string `json:"reply_only_exempt"`
+	ReplyOnlyExempt []string `json:"reply_only_exempt"`
 	// MaxAccountStorageMB limits per-account disk usage (messages + data).
 	// 0 = unlimited.
 	MaxAccountStorageMB int `json:"max_account_storage_mb"`
@@ -144,24 +144,9 @@ func registerRelayInfo(mux *http.ServeMux, label, color string) {
 	})
 }
 
-// anchorRef bundles where this relay's anchor is with the secret that proves it
-// may write there — the two always travel together and both come from config.
-func anchorRef() jmapserver.AnchorRef {
-	return jmapserver.AnchorRef{URL: cfg.AnchorURL, Token: cfg.AnchorToken}
-}
-
-// requireAnchorToken refuses to start an anchored relay that cannot authenticate
-// itself. There is deliberately no "just warn and carry on": an anchor whose
-// writes are unauthenticated lets anyone on the internet claim a name nobody
-// holds, or release somebody else's claim and take it, DNS record and all. A
-// silent fallback here would be exactly the *quiet* security degradation
-// src/did/freshness.ts refuses for the same reason — it also has no default and
-// throws instead.
-func requireAnchorToken() {
-	if cfg.AnchorURL != "" && cfg.AnchorToken == "" {
-		log.Fatalf("config: anchor_url is set but anchor_token is empty — the anchor's writes would be unauthenticated (set it to the anchor's relay_token)")
-	}
-}
+// anchorRef, the anchor-write seam, and DID config validation live in
+// anchor_on.go / anchor_off.go — selected by the noanchor build tag — so this
+// file names nothing from the anchor package.
 
 var cfg Config
 
@@ -898,7 +883,6 @@ func smtpSend(target, from string, to []string, raw []byte) error {
 	return nil
 }
 
-
 // ── setup endpoint ────────────────────────────────────────────────────────────
 
 func registerSetup(mux *http.ServeMux, dataDir string) {
@@ -934,7 +918,7 @@ func registerSetup(mux *http.ServeMux, dataDir string) {
 			localpart, domain, // heading
 			localpart, domain, // done message
 			localpart, domain, // EMAIL js const
-			token,             // TOKEN js const
+			token, // TOKEN js const
 		)
 	})
 }
@@ -1116,7 +1100,7 @@ func main() {
 	if len(cfg.Domains) == 0 {
 		log.Fatalf("config: no domains defined")
 	}
-	requireAnchorToken()
+	checkAnchorConfig()
 
 	dataDir := filepath.Join(dir, "data")
 	smtpDataDir = dataDir // enable per-account activity logging from the delivery path
@@ -1213,8 +1197,10 @@ func main() {
 	// Recover dynamic accounts from previous runs.
 	scanDynAccounts(h, dataDir)
 
-	// Push existing accounts' fingerprints to the identity anchor (best-effort,
-	// off the startup path); logs any pre-existing split it detects.
+	// Periodic upkeep (inactive-account purge). This once also pushed account
+	// fingerprints to the anchor to heal splits; that is gone — a claim names a
+	// DID now, which only the client can prove, so anchorless→anchored migration
+	// is lazy and client-driven (PUT /account/did), never a server backfill.
 	startMaintenance(h, dataDir)
 
 	go startSMTP(h, dataDir)
@@ -1224,17 +1210,15 @@ func main() {
 	registerSetup(mux, dataDir)
 	registerAuthEnv(mux, dataDir)
 	registerProvision(mux, h, dataDir)
-	registerDidUpdate(mux, dataDir)
-	// GET /identity/local/<did> is gone: the anchor's by-did answers the same
+	// DID-only routes (PUT /account/did, /pkarr gateway). registerAnchorRoutes
+	// is a no-op in the noanchor build, which mounts neither. GET
+	// /identity/local/<did> is gone: the anchor's by-did answers the same
 	// question across every relay, not just this one (ANCHOR.md decision 1).
+	registerAnchorRoutes(mux, dataDir)
 	jmapserver.RegisterContactsEndpoints(mux, dataDir, authenticate)
 	if cfg.DomainVerifySecret != "" {
 		registerCustomDomain(mux, dataDir)
 	}
-	// Pkarr/did:dht gateway: this relay no longer runs a DHT node, it forwards
-	// to the anchor's (ANCHOR.md decision 1). The route stays because clients
-	// derive their gateway URL from their own relay and publish only there.
-	jmapserver.RegisterPkarrProxy(mux, anchorRef())
 	registerAccountDelete(mux, h, dataDir)
 	jmapserver.RegisterStorageEndpoints(mux, dataDir, authenticate, func(email string) int {
 		h.mu.RLock()

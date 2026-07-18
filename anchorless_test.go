@@ -1,3 +1,5 @@
+//go:build !noanchor
+
 package main
 
 import (
@@ -16,6 +18,11 @@ import (
 // set anchor_url. ANCHOR.md decision 2 says anchorless means plain accounts and
 // no DIDs at all — and since the local DID index was absorbed into the anchor,
 // there is now literally nowhere on an anchorless relay to put one.
+//
+// This is RUNTIME anchorlessness — an anchor-capable binary with anchor_url
+// unset — so it tests registerDidUpdate, which the noanchor build tag compiles
+// out entirely. Hence the tag: under -tags noanchor there is no /account/did
+// route to refuse a DID, which is a stronger form of the same guarantee.
 
 func anchorlessRelay(t *testing.T) (mux *http.ServeMux, dataDir string) {
 	t.Helper()
